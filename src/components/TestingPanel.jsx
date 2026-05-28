@@ -18,7 +18,7 @@ export default function TestingPanel() {
   const { instance, accounts } = useMsal();
   const account = accounts[0];
 
-  const [isOpen,  setIsOpen ] = useState(false);
+  const [isOpen,  setIsOpen ] = useState(true);   // open by default so it's visible immediately
   const [results, setResults] = useState({});   // testId → result object
   const [busy,    setBusy   ] = useState({});   // testId → bool
 

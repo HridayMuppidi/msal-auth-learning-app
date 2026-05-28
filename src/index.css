@@ -1219,6 +1219,9 @@ a { color: var(--ms-blue); }
   flex-direction: column;
 }
 
+/* Wrapper gets a visible top gap so it doesn't hide below the fold */
+.tp-wrapper { margin-top: 8px; }
+
 /* Toggle button (always visible) */
 .tp-toggle {
   display: flex;
