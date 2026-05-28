@@ -64,25 +64,25 @@ export const loginRequest = {
   ],
 };
 
-// ─── Weather API Request (proper scope for your FastAPI server) ───────────────
+// ─── Weather API Request ──────────────────────────────────────────────────────
 //
-// WHY THIS EXISTS:
-//   loginRequest above uses "User.Read" — a Microsoft GRAPH scope.
-//   The access token it produces has:  aud = "https://graph.microsoft.com"
-//   That token is meant for Graph API, NOT for your FastAPI server.
+// Requests a token scoped to YOUR FastAPI server — not Microsoft Graph.
 //
-// THE PROPER WAY:
-//   To get a token with aud = YOUR client ID, you must:
-//   1. In Azure portal → App Registrations → your app → "Expose an API"
-//   2. Add a scope, e.g. "Weather.Read"
-//   3. Azure assigns it a URI:  api://<clientId>/Weather.Read
-//   4. Request THAT scope here. The resulting token will have:
-//      aud = "0c7237fb-e064-419c-a097-f44cd8b9bddd"  (your client ID)
+// Scope URI format:  api://<clientId>/<scopeName>
+//   clientId  = 0c7237fb-e064-419c-a097-f44cd8b9bddd  (from VITE_CLIENT_ID)
+//   scopeName = Weather.Read                           (exposed in Azure portal)
 //
-// CURRENT STATUS:
-//   If Joe hasn't exposed this scope yet, acquireTokenSilent will fail.
-//   WeatherTab.jsx catches that and falls back to the Graph-scoped token.
-//   Your FastAPI server accepts both (see token_validator.py valid_audiences).
+// Resolves at runtime to:
+//   api://0c7237fb-e064-419c-a097-f44cd8b9bddd/Weather.Read
+//
+// The access token produced by this request has:
+//   aud = "0c7237fb-e064-419c-a097-f44cd8b9bddd"  ← your client ID
+//
+// Compare with loginRequest (User.Read) which produces:
+//   aud = "https://graph.microsoft.com"            ← Microsoft Graph
+//
+// Your FastAPI token_validator.py checks aud against the client ID first.
+// This scope produces the ideal match on the very first validation attempt.
 //
 export const weatherApiRequest = {
   scopes: [`api://${import.meta.env.VITE_CLIENT_ID}/Weather.Read`],

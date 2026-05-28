@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useMsal } from "@azure/msal-react";
-import { loginRequest, weatherApiRequest } from "../authConfig";
+import { weatherApiRequest } from "../authConfig";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -33,31 +33,20 @@ export default function WeatherTab() {
       // The ID token is only for YOUR app to know who the user is.
       //
       // WHICH SCOPE IS REQUESTED?
-      //   We try weatherApiRequest first → scopes: ["api://clientId/Weather.Read"]
-      //   This would produce a token with aud = your client ID (ideal for FastAPI).
-      //   If Joe hasn't configured that scope in Azure portal, MSAL throws an error.
-      //   We catch it and fall back to loginRequest → User.Read (Graph-scoped token).
+      //   weatherApiRequest.scopes = ["api://0c7237fb-e064-419c-a097-f44cd8b9bddd/Weather.Read"]
       //
-      let tokenResponse;
-      let tokenType;
-      let scopeUsed;
-
-      try {
-        tokenResponse = await instance.acquireTokenSilent({
-          ...weatherApiRequest,
-          account,
-        });
-        tokenType = "api-scoped";
-        scopeUsed = weatherApiRequest.scopes[0];
-      } catch {
-        // Custom API scope not configured in Azure portal yet — fall back to Graph token
-        tokenResponse = await instance.acquireTokenSilent({
-          ...loginRequest,
-          account,
-        });
-        tokenType = "graph-scoped (fallback)";
-        scopeUsed = "User.Read (Microsoft Graph)";
-      }
+      //   This produces an access token where:
+      //     aud = "0c7237fb-e064-419c-a097-f44cd8b9bddd"  (your client ID)
+      //
+      //   Your FastAPI token_validator.py checks self.client_id first in valid_audiences,
+      //   so this token passes on the very first validation attempt.
+      //
+      const tokenResponse = await instance.acquireTokenSilent({
+        ...weatherApiRequest,
+        account,
+      });
+      const tokenType = "api-scoped";
+      const scopeUsed = weatherApiRequest.scopes[0];
 
       // Show what token was used so you can see it in the UI
       setTokenInfo({
@@ -153,11 +142,10 @@ export default function WeatherTab() {
             <span className="ti-label">Expires at</span>
             <code className="ti-value">{tokenInfo.expiresOn}</code>
           </div>
-          {tokenInfo.type !== "api-scoped" && (
-            <p className="ti-note">
-              ⚠️ Using Graph-scoped fallback token. To use a proper API-scoped token,
-              Joe needs to expose a <code>Weather.Read</code> scope in Azure portal
-              under App Registration → Expose an API.
+          {tokenInfo.type === "api-scoped" && (
+            <p className="ti-note" style={{ color: "#15803d", borderColor: "#86efac" }}>
+              ✓ Token audience matches your FastAPI client ID — this is the correct
+              scope for a custom backend API.
             </p>
           )}
         </div>
