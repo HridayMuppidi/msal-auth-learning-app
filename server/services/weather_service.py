@@ -1,80 +1,76 @@
 """
-Weather Service
-===============
-Orchestrates two external API calls to produce weather data for a ZIP code:
+Weather Service — with detailed logging
+========================================
+Two external calls happen here:
+  1. Nominatim (OpenStreetMap) geocoding — ZIP → lat/lon
+  2. Open-Meteo weather API            — lat/lon → weather data
 
-  1. Nominatim (OpenStreetMap) — free geocoding, converts ZIP → lat/lon
-  2. Open-Meteo — free weather API, no API key needed
+All upstream responses are validated with Pydantic BEFORE the data is
+returned to the client. If the upstream API changes its schema or returns
+garbage, we return 502 (Bad Gateway) instead of forwarding bad data.
 
-Response validation:
-  The Open-Meteo response is parsed through strict Pydantic models BEFORE
-  it is returned to the client. If the upstream API changes its schema or
-  returns unexpected data, Pydantic raises a ValidationError and the route
-  handler returns a 502 instead of silently passing through junk data.
-
-This is the "response validation" the middleware docstring refers to —
-we validate what comes back from the third-party API, not just what the
-client sends to us.
+What you will see in the terminal:
+  [W1] ZIP 95814 → Nominatim geocoding...
+  [W2] Geocode OK .............. Sacramento, CA  (38.5811, -121.4938)  took 312ms
+  [W3] Open-Meteo fetch ........ lat=38.5811  lon=-121.4938
+  [W4] HTTP response ........... 200 OK  1.1KB  took 201ms
+  [W5] Pydantic validation ..... PASS ✓  (all required fields present and typed correctly)
+  [W6] WMO code ................ 0 → "Clear Sky" ☀️
+  [W7] Summary ................. temp=72.3°F  humidity=55%  wind=5.2mph  precip=0.0in
 """
 
+import time
 import logging
 import httpx
 from typing import Optional
 from pydantic import BaseModel, ValidationError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.weather")
 
 NOMINATIM_URL  = "https://nominatim.openstreetmap.org/search"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-
-# Required by Nominatim's terms of service
 NOMINATIM_HEADERS = {"User-Agent": "MSAL-Auth-Learning-App/1.0 (educational project)"}
 
-
-# ── WMO Weather Interpretation Codes ─────────────────────────────────────────
-# Open-Meteo returns a numeric WMO code describing current conditions.
+# WMO Weather Interpretation Codes
 # Full table: https://open-meteo.com/en/docs#weathervariables
 WMO_CODES: dict[int, tuple[str, str]] = {
-    0:  ("Clear Sky",              "☀️"),
-    1:  ("Mainly Clear",           "🌤️"),
-    2:  ("Partly Cloudy",          "⛅"),
-    3:  ("Overcast",               "☁️"),
-    45: ("Foggy",                  "🌫️"),
-    48: ("Depositing Rime Fog",    "🌫️"),
-    51: ("Light Drizzle",          "🌦️"),
-    53: ("Moderate Drizzle",       "🌦️"),
-    55: ("Dense Drizzle",          "🌧️"),
-    61: ("Slight Rain",            "🌧️"),
-    63: ("Moderate Rain",          "🌧️"),
-    65: ("Heavy Rain",             "🌧️"),
-    71: ("Slight Snow",            "🌨️"),
-    73: ("Moderate Snow",          "❄️"),
-    75: ("Heavy Snow",             "❄️"),
-    77: ("Snow Grains",            "🌨️"),
-    80: ("Slight Rain Showers",    "🌦️"),
-    81: ("Moderate Rain Showers",  "🌧️"),
-    82: ("Violent Rain Showers",   "⛈️"),
-    85: ("Slight Snow Showers",    "🌨️"),
-    86: ("Heavy Snow Showers",     "❄️"),
-    95: ("Thunderstorm",           "⛈️"),
-    96: ("Thunderstorm w/ Hail",   "⛈️"),
+    0:  ("Clear Sky",                  "☀️"),
+    1:  ("Mainly Clear",               "🌤️"),
+    2:  ("Partly Cloudy",              "⛅"),
+    3:  ("Overcast",                   "☁️"),
+    45: ("Foggy",                      "🌫️"),
+    48: ("Depositing Rime Fog",        "🌫️"),
+    51: ("Light Drizzle",              "🌦️"),
+    53: ("Moderate Drizzle",           "🌦️"),
+    55: ("Dense Drizzle",              "🌧️"),
+    61: ("Slight Rain",                "🌧️"),
+    63: ("Moderate Rain",              "🌧️"),
+    65: ("Heavy Rain",                 "🌧️"),
+    71: ("Slight Snow",                "🌨️"),
+    73: ("Moderate Snow",              "❄️"),
+    75: ("Heavy Snow",                 "❄️"),
+    77: ("Snow Grains",                "🌨️"),
+    80: ("Slight Rain Showers",        "🌦️"),
+    81: ("Moderate Rain Showers",      "🌧️"),
+    82: ("Violent Rain Showers",       "⛈️"),
+    85: ("Slight Snow Showers",        "🌨️"),
+    86: ("Heavy Snow Showers",         "❄️"),
+    95: ("Thunderstorm",               "⛈️"),
+    96: ("Thunderstorm w/ Hail",       "⛈️"),
     99: ("Thunderstorm w/ Heavy Hail", "⛈️"),
 }
 
 
-# ── Pydantic Models — Open-Meteo Response Validation ─────────────────────────
-# These models define exactly what shape we expect from Open-Meteo.
-# If any required field is missing or the wrong type, Pydantic raises
-# a ValidationError and we return 502 (Bad Gateway) to the client.
+# ── Pydantic validation models ────────────────────────────────────────────────
 
 class CurrentWeatherData(BaseModel):
-    temperature_2m:        float
-    wind_speed_10m:        float
-    precipitation:         float
-    weather_code:          int
-    relative_humidity_2m:  int
-    time:                  Optional[str] = None
-    interval:              Optional[int] = None
+    temperature_2m:       float
+    wind_speed_10m:       float
+    precipitation:        float
+    weather_code:         int
+    relative_humidity_2m: int
+    time:                 Optional[str] = None
+    interval:             Optional[int] = None
 
 
 class CurrentUnitsData(BaseModel):
@@ -84,8 +80,7 @@ class CurrentUnitsData(BaseModel):
     relative_humidity_2m: Optional[str] = "%"
     time:                 Optional[str] = None
     interval:             Optional[str] = None
-
-    model_config = {"extra": "ignore"}   # Silently ignore any extra fields
+    model_config = {"extra": "ignore"}
 
 
 class OpenMeteoResponse(BaseModel):
@@ -93,120 +88,112 @@ class OpenMeteoResponse(BaseModel):
     longitude:     float
     current:       CurrentWeatherData
     current_units: CurrentUnitsData
-
-    model_config = {"extra": "ignore"}   # Open-Meteo adds many extra top-level fields
+    model_config = {"extra": "ignore"}
 
 
 # ── Geocoding ─────────────────────────────────────────────────────────────────
 
 async def geocode_zipcode(zipcode: str) -> tuple[float, float, str, str]:
-    """
-    Convert a US ZIP code to (latitude, longitude, city, full_location).
-    Uses Nominatim (OpenStreetMap) — free, no API key required.
-    """
+    logger.info("  [W1] ZIP %s → Nominatim geocoding...", zipcode)
+    t0 = time.monotonic()
+
     async with httpx.AsyncClient(timeout=10.0, headers=NOMINATIM_HEADERS) as client:
-        response = await client.get(
-            NOMINATIM_URL,
-            params={
-                "postalcode":   zipcode,
-                "countrycodes": "us",
-                "format":       "json",
-                "limit":        1,
-                "addressdetails": 1,
-            },
-        )
-        response.raise_for_status()
-        results = response.json()
+        resp = await client.get(NOMINATIM_URL, params={
+            "postalcode": zipcode, "countrycodes": "us",
+            "format": "json", "limit": 1, "addressdetails": 1,
+        })
+        resp.raise_for_status()
+        results = resp.json()
+
+    elapsed_ms = (time.monotonic() - t0) * 1000
 
     if not results:
-        raise ValueError(f"ZIP code '{zipcode}' was not found. Check the code and try again.")
+        logger.warning("  [W2] Geocode FAILED .......... ZIP '%s' not found  (took %.0fms)",
+                       zipcode, elapsed_ms)
+        raise ValueError(f"ZIP code '{zipcode}' not found. Verify and try again.")
 
     hit     = results[0]
     address = hit.get("address", {})
+    city    = (address.get("city") or address.get("town")
+               or address.get("village") or address.get("county") or zipcode)
+    loc     = hit.get("display_name", city)
 
-    city = (
-        address.get("city")
-        or address.get("town")
-        or address.get("village")
-        or address.get("county")
-        or zipcode
-    )
-    full_location = hit.get("display_name", city)
+    logger.info("  [W2] Geocode OK .............. %s  (%.4f, %.4f)  took %.0fms",
+                city, float(hit["lat"]), float(hit["lon"]), elapsed_ms)
 
-    logger.info("Geocoded %s → (%s, %s) — %s", zipcode, hit["lat"], hit["lon"], city)
-    return float(hit["lat"]), float(hit["lon"]), city, full_location
+    return float(hit["lat"]), float(hit["lon"]), city, loc
 
 
-# ── Weather Fetch ─────────────────────────────────────────────────────────────
+# ── Weather fetch + validation ────────────────────────────────────────────────
 
 async def fetch_open_meteo(lat: float, lon: float) -> OpenMeteoResponse:
-    """
-    Call Open-Meteo and return a validated response model.
-    Raises ValueError if the response doesn't match the expected schema.
-    """
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            OPEN_METEO_URL,
-            params={
-                "latitude":          lat,
-                "longitude":         lon,
-                "current":           (
-                    "temperature_2m,"
-                    "wind_speed_10m,"
-                    "precipitation,"
-                    "weather_code,"
-                    "relative_humidity_2m"
-                ),
-                "temperature_unit":  "fahrenheit",
-                "wind_speed_unit":   "mph",
-                "precipitation_unit":"inch",
-                "forecast_days":     1,
-            },
-        )
-        response.raise_for_status()
-        raw = response.json()
+    logger.info("  [W3] Open-Meteo fetch ........ lat=%.4f  lon=%.4f", lat, lon)
+    t0 = time.monotonic()
 
-    # ── Response Validation ───────────────────────────────────────────────────
-    # Pydantic validates the structure here. If Open-Meteo changes its API
-    # or returns an error body, this raises ValidationError and we return 502
-    # instead of forwarding garbage data to the client.
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(OPEN_METEO_URL, params={
+            "latitude":           lat,
+            "longitude":          lon,
+            "current":            ("temperature_2m,wind_speed_10m,"
+                                   "precipitation,weather_code,relative_humidity_2m"),
+            "temperature_unit":   "fahrenheit",
+            "wind_speed_unit":    "mph",
+            "precipitation_unit": "inch",
+            "forecast_days":      1,
+        })
+        resp.raise_for_status()
+        raw = resp.json()
+
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    body_kb    = len(resp.content) / 1024
+
+    logger.info("  [W4] HTTP response ........... %d %s  %.1fKB  took %.0fms",
+                resp.status_code, resp.reason_phrase, body_kb, elapsed_ms)
+
+    # ── Pydantic response validation ──────────────────────────────────────────
+    # This is the "outbound response validation" requirement:
+    # We verify the Open-Meteo response matches our schema BEFORE sending to client.
+    logger.info("  [W5] Pydantic validation ..... checking %d top-level fields...",
+                len(raw))
     try:
         validated = OpenMeteoResponse(**raw)
     except ValidationError as exc:
-        logger.error("Open-Meteo response failed schema validation:\n%s", exc)
+        logger.error("  [W5] Pydantic validation ..... FAIL ✗  %d error(s)", exc.error_count())
+        for err in exc.errors():
+            logger.error("       field='%s'  error=%s  input=%s",
+                         ".".join(str(l) for l in err["loc"]), err["msg"], err.get("input"))
         raise ValueError(
-            f"Unexpected response from weather service — schema mismatch: {exc.error_count()} error(s)"
+            f"Open-Meteo returned an unexpected response shape "
+            f"({exc.error_count()} validation error(s)). "
+            "Check server logs for field details."
         ) from exc
 
+    logger.info("  [W5] Pydantic validation ..... PASS ✓  (all required fields present and typed correctly)")
     return validated
 
 
-# ── Main Entry Point ──────────────────────────────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
 async def get_weather_for_zipcode(zipcode: str) -> dict:
-    """
-    Full pipeline:
-      ZIP code → geocode → Open-Meteo → validate → formatted response dict
-    """
     lat, lon, city, full_location = await geocode_zipcode(zipcode)
     weather = await fetch_open_meteo(lat, lon)
 
-    code             = weather.current.weather_code
+    code               = weather.current.weather_code
     description, emoji = WMO_CODES.get(code, ("Unknown Conditions", "🌡️"))
+
+    logger.info("  [W6] WMO code ................ %d → \"%s\" %s", code, description, emoji)
+    logger.info("  [W7] Summary ................. temp=%.1f%s  humidity=%d%%  wind=%.1f%s  precip=%.2f%s",
+                weather.current.temperature_2m, weather.current_units.temperature_2m,
+                weather.current.relative_humidity_2m,
+                weather.current.wind_speed_10m, weather.current_units.wind_speed_10m,
+                weather.current.precipitation, weather.current_units.precipitation)
 
     return {
         "zipcode":  zipcode,
         "city":     city,
         "location": full_location,
-        "coordinates": {
-            "latitude":  round(lat, 4),
-            "longitude": round(lon, 4),
-        },
-        "condition": {
-            "code":        code,
-            "description": description,
-            "emoji":       emoji,
-        },
+        "coordinates": {"latitude": round(lat, 4), "longitude": round(lon, 4)},
+        "condition": {"code": code, "description": description, "emoji": emoji},
         "temperature": {
             "value": weather.current.temperature_2m,
             "unit":  weather.current_units.temperature_2m,

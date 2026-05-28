@@ -1,22 +1,30 @@
 """
-Token Validator
-===============
-Validates Azure AD JWT tokens by:
-  1. Fetching Microsoft's public signing keys (JWKS) — cached for 1 hour
-  2. Finding the key that matches the token's 'kid' header
-  3. Verifying the cryptographic signature (RS256)
-  4. Checking expiry, issuer, and tenant ID
+Token Validator — with detailed step-by-step logging
+=====================================================
+Validates Azure AD JWTs by verifying the cryptographic signature against
+Microsoft's public JWKS keys, then checking every security-relevant claim.
 
-Why is a JWKS needed?
-  Azure AD signs every JWT with an RSA private key and publishes the matching
-  public keys at the JWKS URL. Anyone can fetch these public keys and use them
-  to VERIFY the signature — but only Microsoft can SIGN with the private key.
-  This is the core trust model of public-key cryptography.
+BUG FIX — "Signature verification failed" on valid tokens
+---------------------------------------------------------
+Azure AD's JWKS includes extra fields on each key: x5c (X.509 cert chain),
+x5t (cert thumbprint), x5t#S256 (SHA-256 thumbprint). python-jose v3.3 tries
+to construct the RSA key from x5c FIRST, and if x5c parsing glitches for any
+reason, it raises "Signature verification failed" — even though the n/e RSA
+math would work fine.
 
-Why cache the JWKS?
-  The keys rarely change (only during key rotation). Fetching on every request
-  would be slow and would hammer Microsoft's servers. 1-hour cache is the
-  industry standard — short enough to pick up rotations, long enough to be fast.
+FIX: strip the JWK down to ONLY the RSA parameters (kty, n, e) before passing
+to jwt.decode(). This forces python-jose to use pure RSA math, bypassing x5c.
+
+Log format (what you will see in the terminal):
+  [4a] JWT header .............. alg=RS256  kid=2ZQpJ3Up8bJIWS0...
+  [4b] JWKS cache .............. HIT  (fetched 142s ago, 3458s left)
+  [4c] Key found ............... kid=2ZQpJ3Up8bJIWS0...  kty=RSA  ✓
+  [4d] RSA key ................. using n + e params only (x5c stripped)
+  [4e] Try 1/6 ................. aud=0c7237fb...  iss=.../v2.0  → ✗ InvalidAudienceError
+  [4e] Try 2/6 ................. aud=0c7237fb...  iss=.../sts.windows  → ✗ InvalidAudienceError
+  [4e] Try 3/6 ................. aud=https://graph.microsoft.com  iss=.../v2.0  → ✓ PASS
+  [4f] Tenant check ............ bf2489d8 == bf2489d8  ✓
+  [4g] Token VALID ............. user=you@example.com  aud=https://graph.microsoft.com
 """
 
 import os
@@ -26,13 +34,11 @@ import httpx
 from typing import Optional
 from jose import jwt, JWTError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.token_validator")
 
 
 class TokenValidator:
-    """Stateful validator — one instance shared across all requests via AuthMiddleware."""
-
-    _CACHE_TTL = 3600  # seconds — how long to keep JWKS before re-fetching
+    _CACHE_TTL = 3600  # 1 hour
 
     def __init__(self) -> None:
         self.jwks_uri  = os.getenv("JWKS_URI")
@@ -40,134 +46,186 @@ class TokenValidator:
         self.client_id = os.getenv("CLIENT_ID")
 
         if not all([self.jwks_uri, self.tenant_id, self.client_id]):
-            raise RuntimeError(
-                "Missing required environment variables: JWKS_URI, TENANT_ID, CLIENT_ID"
-            )
+            raise RuntimeError("Missing env vars: JWKS_URI, TENANT_ID, CLIENT_ID")
 
         self._jwks_cache:      Optional[dict] = None
         self._jwks_fetched_at: float          = 0.0
 
-    # ── JWKS Caching ──────────────────────────────────────────────────────────
+    # ── JWKS helpers ──────────────────────────────────────────────────────────
 
-    async def _fetch_jwks(self) -> dict:
-        """Return cached JWKS or refresh from Azure AD if TTL expired."""
+    async def _get_jwks(self) -> dict:
         now = time.monotonic()
-        if self._jwks_cache and (now - self._jwks_fetched_at) < self._CACHE_TTL:
+        age = now - self._jwks_fetched_at
+        if self._jwks_cache and age < self._CACHE_TTL:
+            remaining = int(self._CACHE_TTL - age)
+            logger.info("  [4b] JWKS cache .............. HIT  (fetched %.0fs ago, %ds left)",
+                        age, remaining)
             return self._jwks_cache
         return await self._refresh_jwks()
 
     async def _refresh_jwks(self) -> dict:
-        """Unconditionally fetch fresh JWKS from Azure AD and cache it."""
-        logger.info("Fetching JWKS from Azure AD → %s", self.jwks_uri)
+        logger.info("  [4b] JWKS cache .............. MISS — fetching from Azure AD")
+        logger.info("       URL: %s", self.jwks_uri)
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(self.jwks_uri)
-            response.raise_for_status()
-        self._jwks_cache      = response.json()
+            resp = await client.get(self.jwks_uri)
+            resp.raise_for_status()
+        data = resp.json()
+        self._jwks_cache      = data
         self._jwks_fetched_at = time.monotonic()
-        logger.info("JWKS cached: %d signing keys available", len(self._jwks_cache.get("keys", [])))
-        return self._jwks_cache
+        key_count = len(data.get("keys", []))
+        kids = [k.get("kid", "?")[:20] for k in data.get("keys", [])]
+        logger.info("  [4b] JWKS refreshed .......... %d key(s) cached  kids=%s",
+                    key_count, kids)
+        return data
 
     def _find_key(self, jwks: dict, kid: str) -> Optional[dict]:
-        """Return the JWK whose 'kid' matches the token header's 'kid'."""
-        return next(
-            (k for k in jwks.get("keys", []) if k.get("kid") == kid),
-            None,
-        )
+        return next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
 
-    # ── Validation ────────────────────────────────────────────────────────────
+    # ── Main validation ───────────────────────────────────────────────────────
 
     async def validate(self, token: str) -> dict:
-        """
-        Fully validate a JWT. Raises on any failure. Returns decoded claims on success.
-
-        Steps:
-          1. Read the unverified header to get 'kid' (which signing key to use)
-          2. Fetch the matching public key from JWKS (cached)
-          3. Try decoding against each valid (audience, issuer) combination
-          4. Verify the tenant ID in the claims matches our expected tenant
-
-        Why multiple audiences?
-          In a production app, you'd register a custom API scope
-          (e.g. api://your-app-id/Weather.Read) and the access token would have
-          aud = your client ID. Here, since no custom scope exists, the React app
-          sends a Graph-scoped access token (aud = Graph's app ID). We accept
-          both to support this learning setup.
-        """
-        # Step 1: Read header without verification (safe — just inspecting metadata)
+        # ── Step 4a: Decode header (no signature check — just reading metadata) ─
         try:
             header = jwt.get_unverified_header(token)
         except JWTError as exc:
-            raise ValueError(f"Malformed JWT — cannot read header: {exc}") from exc
+            logger.warning("  [4a] JWT header .............. UNREADABLE ✗  %s", exc)
+            raise ValueError(f"Cannot read JWT header: {exc}") from exc
 
-        alg = header.get("alg", "")
-        kid = header.get("kid", "")
+        alg = header.get("alg", "?")
+        kid = header.get("kid", "?")
+
+        logger.info("  [4a] JWT header .............. alg=%s  kid=%s…", alg, kid[:20])
 
         if alg != "RS256":
-            raise ValueError(f"Rejected: algorithm '{alg}' is not allowed. Only RS256 is accepted.")
+            logger.warning("  [4a] Algorithm ............... '%s' NOT ALLOWED ✗  (only RS256)", alg)
+            raise ValueError(f"Algorithm '{alg}' rejected — only RS256 is accepted.")
 
-        # Step 2: Find the matching public key
-        jwks = await self._fetch_jwks()
-        key  = self._find_key(jwks, kid)
+        logger.info("  [4a] Algorithm ............... RS256 ✓")
+
+        # ── Step 4b: Fetch JWKS (logged inside _get_jwks) ───────────────────────
+        jwks = await self._get_jwks()
+
+        # ── Step 4c: Find matching public key ───────────────────────────────────
+        key = self._find_key(jwks, kid)
 
         if key is None:
-            # kid not found — Azure may have just rotated keys. Force one refresh.
-            logger.warning("kid='%s' not in cached JWKS — forcing refresh", kid)
+            logger.warning("  [4c] Key lookup .............. kid='%s' NOT IN CACHE ⚠ — forcing refresh", kid)
             jwks = await self._refresh_jwks()
             key  = self._find_key(jwks, kid)
 
         if key is None:
-            raise ValueError(f"No public key found for kid='{kid}' — token cannot be verified")
+            available = [k.get("kid", "?")[:20] for k in jwks.get("keys", [])]
+            logger.error("  [4c] Key lookup .............. kid='%s' NOT FOUND ✗", kid)
+            logger.error("       Available kids: %s", available)
+            raise ValueError(
+                f"No public key for kid='{kid}'. "
+                f"Available: {available}. "
+                "Azure may have rotated keys — try again."
+            )
 
-        # Step 3: Try every valid (audience × issuer) combination.
-        # Azure AD v2.0 issues tokens with one of these issuers:
+        logger.info("  [4c] Key found ............... kid=%s…  kty=%s  use=%s  ✓",
+                    kid[:20], key.get("kty"), key.get("use"))
+
+        # ── Step 4d: Strip key to RSA math params only ──────────────────────────
+        # WHY: python-jose tries x5c (certificate chain) first. If x5c parsing
+        # fails for any reason, it raises "Signature verification failed" even
+        # though n+e would work. Stripping to n+e forces the correct path.
+        rsa_key = {
+            "kty": key["kty"],
+            "n":   key["n"],
+            "e":   key["e"],
+        }
+        stripped_fields = [f for f in ("x5c", "x5t", "x5t#S256", "alg", "use", "kid") if f in key]
+        logger.info("  [4d] RSA key ................. using n+e params only  (stripped: %s)",
+                    stripped_fields)
+
+        # ── Step 4e: Try every (audience × issuer) combination ──────────────────
+        # Why multiple audiences?
+        #   IDEAL:   aud = client_id (requires custom scope in Azure portal)
+        #   CURRENT: aud = graph URL (because loginRequest uses User.Read scope)
+        # See authConfig.js → weatherApiRequest for the proper scope.
+        valid_audiences = [
+            self.client_id,                              # Ideal — own API scope
+            "https://graph.microsoft.com",              # Graph access token (most common)
+            "00000003-0000-0000-c000-000000000000",     # Graph app ID (alternate)
+        ]
         valid_issuers = [
             f"https://login.microsoftonline.com/{self.tenant_id}/v2.0",
             f"https://sts.windows.net/{self.tenant_id}/",
         ]
-        # And one of these audiences (see docstring above for why):
-        valid_audiences = [
-            self.client_id,                              # ID token or own-API access token
-            "https://graph.microsoft.com",              # Graph access token (most common)
-            "00000003-0000-0000-c000-000000000000",     # Graph access token (alternate form)
-        ]
 
+        total_combos  = len(valid_audiences) * len(valid_issuers)
+        attempt       = 0
         last_error: Optional[Exception] = None
 
         for audience in valid_audiences:
             for issuer in valid_issuers:
+                attempt += 1
+                aud_short = audience if len(audience) < 36 else audience[:35] + "…"
+                iss_short = issuer.replace("https://login.microsoftonline.com/", ".../")
+                iss_short = iss_short.replace("https://sts.windows.net/", "sts/")
+
                 try:
                     claims = jwt.decode(
                         token,
-                        key,
+                        rsa_key,
                         algorithms=["RS256"],
                         audience=audience,
                         issuer=issuer,
                         options={
-                            "verify_exp": True,   # Reject expired tokens
-                            "verify_nbf": True,   # Reject tokens not yet valid
-                            "verify_iat": True,   # Verify issued-at is in the past
+                            "verify_exp": True,
+                            "verify_nbf": True,
+                            "verify_iat": True,
                         },
                     )
 
-                    # Step 4: Tenant check — the token must belong to Joe's tenant.
-                    # This prevents tokens from OTHER Azure AD tenants from working
-                    # even if they have a valid signature.
+                    logger.info("  [4e] Try %d/%d ................ aud=%-42s iss=%s  → ✓ PASS",
+                                attempt, total_combos, aud_short, iss_short)
+
+                    # ── Step 4f: Extra tenant check ──────────────────────────────
                     token_tid = claims.get("tid")
                     if token_tid and token_tid != self.tenant_id:
+                        logger.warning("  [4f] Tenant check ............ %s != %s ✗ MISMATCH",
+                                       token_tid, self.tenant_id)
                         raise JWTError(
-                            f"Token tenant '{token_tid}' does not match expected '{self.tenant_id}'"
+                            f"Token tenant '{token_tid}' ≠ expected '{self.tenant_id}'. "
+                            "This token is from a different Azure AD tenant."
                         )
 
-                    user_id = (
-                        claims.get("preferred_username")
-                        or claims.get("upn")
-                        or claims.get("oid", "unknown")
-                    )
-                    logger.info("✓ Token valid | user=%s | aud=%s", user_id, audience)
+                    logger.info("  [4f] Tenant check ............ %s == %s ✓",
+                                token_tid, self.tenant_id)
+
+                    # ── Step 4g: Log success summary ─────────────────────────────
+                    user = (claims.get("preferred_username")
+                            or claims.get("upn")
+                            or claims.get("oid", "unknown"))
+                    exp  = claims.get("exp", 0)
+                    ttl  = max(0, int(exp - time.time()))
+
+                    logger.info("  [4g] Token VALID ............. user=%s", user)
+                    logger.info("       aud=%s", audience)
+                    logger.info("       iss=%s", claims.get("iss"))
+                    logger.info("       oid=%s", claims.get("oid"))
+                    logger.info("       exp=%d  (expires in %ds / %.1fmin)", exp, ttl, ttl / 60)
+                    logger.info("       scp=%s", claims.get("scp") or claims.get("roles") or "(none)")
+
                     return claims
 
                 except JWTError as exc:
+                    error_type = type(exc).__name__
+                    logger.warning("  [4e] Try %d/%d ................ aud=%-42s iss=%s  → ✗ %s",
+                                   attempt, total_combos, aud_short, iss_short, error_type)
+                    logger.debug("       Detail: %s", exc)
                     last_error = exc
                     continue
 
-        raise JWTError(f"Token rejected — all validation attempts failed. Last error: {last_error}")
+        logger.error("  [4e] ALL %d COMBINATIONS FAILED ✗", total_combos)
+        logger.error("       Last error: %s", last_error)
+        logger.error("       Hint: if error is 'Signature verification failed', check that")
+        logger.error("             the JWKS kid matches the token kid above.")
+        logger.error("             If error is 'InvalidAudienceError', the token's aud claim")
+        logger.error("             does not match any expected value (see authConfig.js).")
+        raise JWTError(
+            f"Token rejected — all {total_combos} validation attempts failed. "
+            f"Last error: {last_error}"
+        )
