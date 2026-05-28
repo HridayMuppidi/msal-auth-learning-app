@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useMsal } from "@azure/msal-react";
 import { loginRequest } from "../authConfig";
 import TokenDisplay from "./TokenDisplay";
+import WeatherTab from "./WeatherTab";
 
 export default function Dashboard({ authResult }) {
   const { instance, accounts } = useMsal();
@@ -37,6 +38,7 @@ export default function Dashboard({ authResult }) {
     { id: "profile",      label: "User Profile" },
     { id: "id-token",     label: "ID Token" },
     { id: "access-token", label: "Access Token" },
+    { id: "weather",      label: "🌤️ Weather" },
   ];
 
   return (
@@ -82,6 +84,8 @@ export default function Dashboard({ authResult }) {
             error={tokenError}
           />
         )}
+
+        {activeTab === "weather" && <WeatherTab />}
       </div>
     </div>
   );
