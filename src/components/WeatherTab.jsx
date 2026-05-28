@@ -11,6 +11,7 @@
 import React, { useState, useCallback } from "react";
 import { useMsal } from "@azure/msal-react";
 import { weatherApiRequest } from "../authConfig";
+import TestingPanel from "./TestingPanel";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -281,6 +282,9 @@ export default function WeatherTab() {
 
       {/* ── Result ─────────────────────────────────────────────────────────── */}
       {result && !loading && <ResultPanel result={result} />}
+
+      {/* ── Testing Panel ─────────────────────────────────────────────────── */}
+      <TestingPanel />
     </div>
   );
 }

@@ -140,13 +140,14 @@ class TokenValidator:
                     stripped_fields)
 
         # ── Step 4e: Try every (audience × issuer) combination ──────────────────
-        # WeatherTab now requests api://clientId/Weather.Read so the token's aud is
-        # "api://clientId" — that must be the FIRST entry so it matches on attempt 1.
+        # Only accept tokens scoped to THIS API — not Microsoft Graph.
+        # Graph tokens (aud = graph.microsoft.com) are intentionally excluded:
+        #  - The app now has a proper api://clientId/Weather.Read scope configured
+        #  - Accepting Graph tokens would mean ANY app with User.Read could call us
+        #  - This also makes TestingPanel test #6 (Wrong Audience) produce a real failure
         valid_audiences = [
-            f"api://{self.client_id}",                   # ✅ Custom API scope  → aud = api://clientId
-            self.client_id,                              # Client ID GUID alone  → aud = bare GUID
-            "https://graph.microsoft.com",              # Graph access token    → aud = graph URL
-            "00000003-0000-0000-c000-000000000000",     # Graph app ID alternate
+            f"api://{self.client_id}",  # Primary — api://0c7237fb.../Weather.Read token
+            self.client_id,             # Fallback — bare GUID form of the same app
         ]
         valid_issuers = [
             f"https://login.microsoftonline.com/{self.tenant_id}/v2.0",
