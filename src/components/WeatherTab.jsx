@@ -207,54 +207,55 @@ export default function WeatherTab() {
     <div className="wt-root">
 
       {/* ── Auth flow diagram ─────────────────────────────────────────────── */}
+      {/* Shows the path every request takes through the stack.             */}
+      {/* The Auth Middleware step is highlighted because that's where      */}
+      {/* most of the attack scenarios get stopped.                         */}
       <div className="wt-flow">
-        <FlowBox icon="🔑" label="MSAL\nget token" />
-        <Arrow />
-        <FlowBox icon="📤" label="GET /weather\n+ Bearer …" />
-        <Arrow />
-        <FlowBox icon="🛡️"  label="CORS\ncheck" />
-        <Arrow />
-        <FlowBox icon="🔍" label="Auth\nMiddleware" accent />
-        <Arrow />
-        <FlowBox icon="📋" label="Route\nHandler" />
-        <Arrow />
-        <FlowBox icon="🌐" label="Open-\nMeteo" />
-        <Arrow />
-        <FlowBox icon="✅" label="Weather\ndata" />
+        {[
+          { icon: "🔑", label: "MSAL token" },
+          { icon: "📤", label: "GET /weather + Bearer" },
+          { icon: "🛡️", label: "CORS" },
+          { icon: "🔍", label: "Auth Middleware", accent: true },
+          { icon: "📋", label: "Route Handler" },
+          { icon: "🌐", label: "Open-Meteo" },
+          { icon: "✅", label: "Weather data" },
+        ].map((step, i, arr) => (
+          <React.Fragment key={step.label}>
+            <div className={`flow-item${step.accent ? " flow-item-accent" : ""}`}>
+              <span className="flow-item-icon">{step.icon}</span>
+              <span className="flow-item-label">{step.label}</span>
+            </div>
+            {i < arr.length - 1 && <span className="flow-arrow">›</span>}
+          </React.Fragment>
+        ))}
       </div>
 
-      {/* ── Real weather request ───────────────────────────────────────────── */}
+      {/* ── Single combined card: form + attack chips ──────────────────────── */}
+      {/* The "Get Weather" button and the attack scenarios are the same       */}
+      {/* thing — they all send a request to the same endpoint. The only       */}
+      {/* difference is what's in the Authorization header or the ZIP value.   */}
       <div className="wt-section">
-        <div className="wt-section-header">
-          <h3>Get real weather</h3>
-          <span className="wt-section-tag">Normal flow — all layers pass</span>
-        </div>
         <form className="zip-form" onSubmit={handleWeather}>
           <input
             className="zip-input"
             type="text"
             inputMode="numeric"
-            placeholder="ZIP code — e.g. 95814"
+            placeholder="Enter a ZIP code — e.g. 95814"
             value={zipcode}
             maxLength={5}
             onChange={(e) => setZipcode(e.target.value.replace(/\D/g, "").slice(0, 5))}
           />
           <button className="btn-fetch" type="submit" disabled={loading || zipcode.length !== 5}>
-            {loading ? "Fetching…" : "Get Weather"}
+            {loading ? "Fetching…" : "🌤️ Get Weather"}
           </button>
         </form>
-      </div>
 
-      {/* ── Attack scenarios ───────────────────────────────────────────────── */}
-      <div className="wt-section">
-        <div className="wt-section-header">
-          <h3>Break it — try these attacks</h3>
-          <span className="wt-section-tag">Each one hits a different protection layer</span>
+        <div className="wt-or">
+          <div className="wt-or-line" />
+          <span className="wt-or-text">or send a broken request — see which layer catches it</span>
+          <div className="wt-or-line" />
         </div>
-        <p className="wt-hint">
-          Click any button below to send a request with something wrong. The result panel
-          will tell you exactly which layer caught it and why.
-        </p>
+
         <div className="scenario-grid">
           {SCENARIOS.map(s => (
             <button
@@ -262,9 +263,9 @@ export default function WeatherTab() {
               className={`scenario-chip chip-${s.color}`}
               onClick={() => handleScenario(s)}
               disabled={loading}
+              title={s.sent}
             >
-              <span>{s.emoji}</span>
-              <span className="chip-label">{s.label}</span>
+              {s.emoji} {s.label}
             </button>
           ))}
         </div>
@@ -407,18 +408,6 @@ function ResultPanel({ result }) {
 
 // ── Small helpers ─────────────────────────────────────────────────────────────
 
-function FlowBox({ icon, label, accent }) {
-  return (
-    <div className={`flow-box ${accent ? "flow-box-accent" : ""}`}>
-      <span className="flow-box-icon">{icon}</span>
-      <span className="flow-box-label">{label}</span>
-    </div>
-  );
-}
-
-function Arrow() {
-  return <span className="flow-arrow">›</span>;
-}
 
 function WeatherStat({ icon, label, value }) {
   return (
