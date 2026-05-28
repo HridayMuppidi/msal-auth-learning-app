@@ -140,14 +140,13 @@ class TokenValidator:
                     stripped_fields)
 
         # ── Step 4e: Try every (audience × issuer) combination ──────────────────
-        # Why multiple audiences?
-        #   IDEAL:   aud = client_id (requires custom scope in Azure portal)
-        #   CURRENT: aud = graph URL (because loginRequest uses User.Read scope)
-        # See authConfig.js → weatherApiRequest for the proper scope.
+        # WeatherTab now requests api://clientId/Weather.Read so the token's aud is
+        # "api://clientId" — that must be the FIRST entry so it matches on attempt 1.
         valid_audiences = [
-            self.client_id,                              # Ideal — own API scope
-            "https://graph.microsoft.com",              # Graph access token (most common)
-            "00000003-0000-0000-c000-000000000000",     # Graph app ID (alternate)
+            f"api://{self.client_id}",                   # ✅ Custom API scope  → aud = api://clientId
+            self.client_id,                              # Client ID GUID alone  → aud = bare GUID
+            "https://graph.microsoft.com",              # Graph access token    → aud = graph URL
+            "00000003-0000-0000-c000-000000000000",     # Graph app ID alternate
         ]
         valid_issuers = [
             f"https://login.microsoftonline.com/{self.tenant_id}/v2.0",

@@ -3,7 +3,6 @@ import { useMsal } from "@azure/msal-react";
 import { loginRequest } from "../authConfig";
 import TokenDisplay from "./TokenDisplay";
 import WeatherTab from "./WeatherTab";
-import ApiTestPanel from "./ApiTestPanel";
 
 export default function Dashboard({ authResult }) {
   const { instance, accounts } = useMsal();
@@ -40,7 +39,6 @@ export default function Dashboard({ authResult }) {
     { id: "id-token",     label: "ID Token" },
     { id: "access-token", label: "Access Token" },
     { id: "weather",      label: "🌤️ Weather" },
-    { id: "api-tests",   label: "🧪 API Tests" },
   ];
 
   return (
@@ -87,8 +85,7 @@ export default function Dashboard({ authResult }) {
           />
         )}
 
-        {activeTab === "weather"    && <WeatherTab />}
-        {activeTab === "api-tests" && <ApiTestPanel />}
+        {activeTab === "weather" && <WeatherTab />}
       </div>
     </div>
   );
